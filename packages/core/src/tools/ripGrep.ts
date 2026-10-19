@@ -281,6 +281,8 @@ class GrepToolInvocation extends BaseToolInvocation<
         signal.addEventListener('abort', onAbort, { once: true });
       }
 
+      const timeoutMessage = `Operation timed out after ${timeoutMs}ms. In large repositories, consider narrowing your search scope by specifying a 'dir_path' or an 'include_pattern'.`;
+
       let allMatches: GrepMatch[];
       try {
         allMatches = await this.performRipgrepSearch({
@@ -298,11 +300,14 @@ class GrepToolInvocation extends BaseToolInvocation<
           max_matches_per_file: this.params.max_matches_per_file,
           signal: timeoutController.signal,
         });
+        // execStreaming resolves normally when the signal fires, so a timeout
+        // shows up here as a short (or empty) result rather than an error.
+        if (timeoutController.signal.aborted && !signal.aborted) {
+          throw new Error(timeoutMessage);
+        }
       } catch (error) {
         if (timeoutController.signal.aborted) {
-          throw new Error(
-            `Operation timed out after ${timeoutMs}ms. In large repositories, consider narrowing your search scope by specifying a 'dir_path' or an 'include_pattern'.`,
-          );
+          throw new Error(timeoutMessage);
         }
         throw error;
       } finally {
@@ -376,6 +381,7 @@ class GrepToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
   ): Promise<GrepMatch[]> {
     if (
+      !signal.aborted &&
       matchCount >= 1 &&
       matchCount <= 3 &&
       !this.params.names_only &&

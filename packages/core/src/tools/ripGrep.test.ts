@@ -950,6 +950,76 @@ describe('RipGrepTool', () => {
     });
   });
 
+  describe('search timeout', () => {
+    // Emits the given matches, then hangs until killed, like a slow ripgrep.
+    function createHangingSpawn(matchCount: number) {
+      return () => {
+        const stdout = new PassThrough();
+        const mockProcess = new EventEmitter() as ChildProcess;
+        mockProcess.stdout = stdout;
+        mockProcess.stderr = new PassThrough();
+        // @ts-expect-error - mocking private/internal property
+        mockProcess.exitCode = null;
+        // @ts-expect-error - mocking private/internal property
+        mockProcess.killed = false;
+        mockProcess.kill = vi.fn(() => {
+          // @ts-expect-error - mocking private/internal property
+          mockProcess.killed = true;
+          stdout.end();
+          setImmediate(() => mockProcess.emit('close', null, 'SIGTERM'));
+          return true;
+        });
+        for (let i = 1; i <= matchCount; i++) {
+          stdout.write(
+            JSON.stringify({
+              type: 'match',
+              data: {
+                path: { text: 'fileA.txt' },
+                line_number: i,
+                lines: { text: `hello world ${i}\n` },
+              },
+            }) + '\n',
+          );
+        }
+        return mockProcess;
+      };
+    }
+
+    async function executeUntilTimeout(matchCount: number) {
+      mockSpawn.mockImplementation(createHangingSpawn(matchCount));
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const invocation = grepTool.build({ pattern: 'world' });
+        const pending = invocation.execute({ abortSignal });
+        // The timeout is registered after some async setup, so wait for the
+        // search to actually start before advancing the clock.
+        while (mockSpawn.mock.calls.length === 0) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        await vi.advanceTimersByTimeAsync(30_000);
+        return await pending;
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+
+    it.each([1, 5])(
+      'should return an error instead of partial results when %i match(es) were found before the timeout',
+      async (matchCount) => {
+        const result = await executeUntilTimeout(matchCount);
+
+        expect(result.error).toEqual({
+          message: expect.stringContaining('Operation timed out after 30000ms'),
+          type: ToolErrorType.GREP_EXECUTION_ERROR,
+        });
+        expect(result.llmContent).not.toContain('No matches found');
+        expect(result.llmContent).not.toContain('Found');
+        // The auto-context pass must not run on an already timed-out signal.
+        expect(mockSpawn).toHaveBeenCalledTimes(1);
+      },
+    );
+  });
+
   describe('error handling and edge cases', () => {
     it('should handle workspace boundary violations', () => {
       const params: RipGrepToolParams = {
